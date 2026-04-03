@@ -1,3 +1,4 @@
+// server.js
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
@@ -16,8 +17,6 @@ mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected successfully!"))
   .catch((err) => console.error("MongoDB connection error:", err));
-
-console.log("Gemini key loaded:", process.env.GEMINI_API_KEY ? "YES" : "NO");
 
 // ---------------- GEMINI ----------------
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -52,15 +51,15 @@ app.get("/", (req, res) => {
 
 app.post("/generate-plan", async (req, res) => {
   try {
-    console.log("Generate plan route hit!");
-
     const { destination, startDate, endDate, budget, interests } = req.body;
+
+    if (!destination || !startDate || !endDate || !budget || !interests) {
+      return res.status(400).json({ error: "Please fill all fields" });
+    }
 
     const start = new Date(startDate);
     const end = new Date(endDate);
-
-    const timeDifference = end.getTime() - start.getTime();
-    let totalDays = Math.ceil(timeDifference / (1000 * 60 * 60 * 24)) + 1;
+    const totalDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
 
     if (isNaN(totalDays) || totalDays <= 0) {
       return res.status(400).json({ error: "Invalid travel dates selected." });
@@ -70,19 +69,15 @@ app.post("/generate-plan", async (req, res) => {
 
     // ---------------- AI PROMPT ----------------
     const prompt = `
-You are a smart travel planner AI.
-
+You are a smart AI travel planner.
 Generate a personalized travel plan for the following trip:
-
 Destination: ${destination}
 Start Date: ${startDate}
 End Date: ${endDate}
 Trip Duration: ${totalDays} days
 Budget: ₹${budget}
 Interests: ${interests}
-
-Return the response ONLY in valid JSON format like this:
-
+Return ONLY valid JSON in this format:
 {
   "summary": "short trip summary",
   "itinerary": [
@@ -91,77 +86,68 @@ Return the response ONLY in valid JSON format like this:
   ],
   "tip": "one useful travel tip"
 }
-
 Rules:
-- itinerary must contain exactly ${totalDays} days
-- make the plan realistic, personalized, and engaging
-- tailor it to the user's interests and budget
-- do not include markdown
-- do not include explanation outside JSON
+- Itinerary must have exactly ${totalDays} unique days.
+- Each day should have different activities based on the destination and interests.
+- Tailor it to the user's budget.
+- Do not include markdown or explanations.
 `;
 
-    // ---------------- GEMINI WITH FALLBACK ----------------
-    let aiPlan;
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+    let aiPlan = {
+      summary: `Your ${totalDays}-day trip to ${destination} is ready.`,
+      itinerary: [],
+      tip: `Carry comfortable clothing and plan your days wisely while visiting ${destination}.`
+    };
 
     try {
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-      const result = await model.generateContent([prompt]);
-      const text = result.response.text();
-
+      const result = await model.generateContent(prompt);
+      const text = (await result.response).text();
       console.log("Gemini raw response:", text);
 
       let cleanedText = text.trim();
-
       if (cleanedText.startsWith("```json")) {
         cleanedText = cleanedText.replace("```json", "").replace("```", "").trim();
       } else if (cleanedText.startsWith("```")) {
         cleanedText = cleanedText.replace(/```/g, "").trim();
       }
 
-      aiPlan = JSON.parse(cleanedText);
+      const parsed = JSON.parse(cleanedText);
+      aiPlan.summary = parsed.summary || aiPlan.summary;
 
-      if (!Array.isArray(aiPlan.itinerary)) {
-        aiPlan.itinerary = Array.from(
-          { length: totalDays },
-          (_, i) =>
-            `Day ${i + 1}: Explore ${destination} based on your interests in ${interests}.`
-        );
+      if (Array.isArray(parsed.itinerary) && parsed.itinerary.length === totalDays) {
+        aiPlan.itinerary = parsed.itinerary;
       }
 
-      if (!aiPlan.summary) {
-        aiPlan.summary = `Your ${totalDays}-day trip to ${destination} from ${startDate} to ${endDate} is planned around your interests in ${interests} with an estimated budget of ₹${budget}.`;
-      }
+      aiPlan.tip = parsed.tip || aiPlan.tip;
 
-      if (!aiPlan.tip) {
-        aiPlan.tip = `Carry comfortable clothing and plan your days wisely while visiting ${destination}.`;
-      }
-    } catch (geminiError) {
-      console.error("Gemini failed, using fallback:", geminiError.message);
+    } catch (err) {
+      console.error("Gemini JSON parse failed or invalid itinerary, using smart fallback:", err);
 
-      aiPlan = {
-        summary: `Your ${totalDays}-day trip to ${destination} from ${startDate} to ${endDate} is planned around your interests in ${interests} with an estimated budget of ₹${budget}.`,
-        itinerary: Array.from(
-          { length: totalDays },
-          (_, i) =>
-            `Day ${i + 1}: Explore ${destination} based on your interests in ${interests}.`
-        ),
-        tip: `Carry comfortable clothing and plan your days wisely while visiting ${destination}.`,
-      };
+      const activitiesList = [
+        "visit a famous temple",
+        "try local cuisine",
+        "explore markets",
+        "take a city tour",
+        "relax at a park",
+        "attend a cultural event"
+      ];
+
+      aiPlan.itinerary = Array.from({ length: totalDays }, (_, i) => {
+        const activity = activitiesList[i % activitiesList.length];
+        return `Day ${i + 1}: ${activity} in ${destination} based on your interest in ${interests}.`;
+      });
     }
 
-    // ---------------- WEATHER PART ----------------
+    // ---------------- WEATHER ----------------
     let weatherInfo = "Weather info not available";
-
     try {
       const weatherRes = await axios.get(
-        `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(
-          destination
-        )}&appid=${process.env.OPENWEATHER_KEY}&units=metric`
+        `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(destination)}&appid=${process.env.OPENWEATHER_KEY}&units=metric`
       );
-
       const temp = weatherRes.data.main.temp;
       const description = weatherRes.data.weather[0].description;
-
       weatherInfo = `Current temperature: ${temp}°C, ${description}`;
     } catch (err) {
       console.log("OpenWeather fetch failed:", err.message);
@@ -181,38 +167,34 @@ Rules:
       days: totalDays.toString(),
       budget,
       interests,
-      summary: aiPlan.summary || `Your ${totalDays}-day trip to ${destination} is ready.`,
-      itinerary: Array.isArray(aiPlan.itinerary)
-        ? aiPlan.itinerary
-        : Array.from(
-            { length: totalDays },
-            (_, i) =>
-              `Day ${i + 1}: Explore ${destination} based on your interests in ${interests}.`
-          ),
+      summary: aiPlan.summary,
+      itinerary: aiPlan.itinerary,
       budgetBreakdown: {
-        stay: `₹${stay || 0}`,
-        food: `₹${food || 0}`,
-        transport: `₹${transport || 0}`,
-        activities: `₹${activities || 0}`,
+        stay: `₹${stay}`,
+        food: `₹${food}`,
+        transport: `₹${transport}`,
+        activities: `₹${activities}`,
       },
-      tip:
-        aiPlan.tip ||
-        `Carry comfortable clothing and plan your days wisely while visiting ${destination}.`,
+      tip: aiPlan.tip,
       weather: weatherInfo,
     };
 
     // ---------------- SAVE TO MONGODB ----------------
-    const savedTrip = await Trip.create(plan);
-    console.log("Trip saved to MongoDB successfully!");
+    try {
+      const savedTrip = await Trip.create(plan);
+      res.json(savedTrip);
+    } catch (mongoErr) {
+      console.error("MongoDB save failed, returning plan without saving:", mongoErr);
+      res.json(plan); // send plan even if DB save fails
+    }
 
-    res.json(savedTrip);
   } catch (error) {
-    console.error("FULL ERROR:", error.message);
-    res.status(500).json({ error: error.message });
+    console.error("Error generating AI plan:", error);
+    res.status(500).json({ error: "Something went wrong while generating the plan." });
   }
 });
 
-// ---------------- VIEW SAVED TRIPS ----------------
+// ---------------- GET ALL TRIPS ----------------
 app.get("/trips", async (req, res) => {
   try {
     const trips = await Trip.find().sort({ createdAt: -1 });
@@ -222,6 +204,7 @@ app.get("/trips", async (req, res) => {
   }
 });
 
+// ---------------- START SERVER ----------------
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
