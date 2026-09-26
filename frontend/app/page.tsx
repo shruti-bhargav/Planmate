@@ -38,7 +38,7 @@ export default function Home() {
     try {
       setLoading(true);
 
-      const res = await fetch("http://localhost:5000/generate-plan", {
+      const res = await fetch("https://planmate-l807.onrender.com/generate-plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ destination, startDate, endDate, budget, interests }),
